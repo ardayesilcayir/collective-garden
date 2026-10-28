@@ -1,0 +1,8 @@
+[package]
+name = "kolektif_bahce"
+edition = "2024"
+
+[dependencies]
+
+[addresses]
+kolektif_bahce = "0x0"
