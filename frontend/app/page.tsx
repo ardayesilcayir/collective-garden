@@ -1,66 +1,91 @@
+"use client";
+
 import Link from "next/link";
+import { useCurrentAccount } from "@mysten/dapp-kit-react";
+import { PlantArt } from "@/components/PlantArt";
+import { WalletButton } from "@/components/Providers";
+import { useGarden } from "@/hooks/useGarden";
+import { IS_CONFIGURED } from "@/lib/config";
+import { formatSui } from "@/lib/format";
+import { stageName } from "@/lib/garden";
+
+const LOOP = [
+  { title: "Sula", body: "Her sulama bitkiye su, sana katkı puanı kazandırır. Aynı adres kısa bir beklemeden sonra tekrar sulayabilir." },
+  { title: "Büyüt", body: "Yeterli su birikip aşama süresi dolunca herkes bitkiyi bir sonraki aşamaya taşıyabilir." },
+  { title: "Fonla", body: "Sponsorlar ve topluluk, bitki olgunlaşmadan önce ödül havuzuna SUI ekler." },
+  { title: "Hasat et", body: "Bitki çiçek açınca her katılımcı puanı oranında payını kendisi çeker." },
+];
 
 export default function Home() {
+  const account = useCurrentAccount();
+  const { data: garden } = useGarden();
+
   return (
-    <div className="flex flex-col items-center gap-12 py-16 text-center">
-      {/* Hero */}
-      <div className="flex flex-col items-center gap-4">
-        <div className="text-8xl animate-bounce">🌿</div>
-        <h1 className="text-5xl font-extrabold text-white">
-          Kolektif Bahçe
-        </h1>
-        <p className="text-xl text-gray-400 max-w-xl">
-          Topluluğunuzun birlikte büyüttüğü, katkıya göre ödül dağıtan zincir üstü bahçe.
-        </p>
-        <p className="text-sm text-emerald-500 font-mono">
-          Sui Testnet · Move
-        </p>
-      </div>
-
-      {/* CTA Butonları */}
-      <div className="flex flex-wrap gap-4 justify-center">
-        <Link
-          href="/garden"
-          className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-8 py-3 rounded-xl text-lg transition-colors"
-        >
-          🌱 Bahçeye Git
-        </Link>
-        <Link
-          href="/leaderboard"
-          className="bg-gray-800 hover:bg-gray-700 text-white font-bold px-8 py-3 rounded-xl text-lg transition-colors"
-        >
-          🏆 Sıralama
-        </Link>
-      </div>
-
-      {/* Özellikler */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 w-full max-w-3xl">
-        {[
-          { icon: "💧", title: "Sulayarak Kazan", desc: "Her sulama katkı puanı kazandırır. Cooldown: 1 saat." },
-          { icon: "🌻", title: "Birlikte Büyüt", desc: "5 aşamalı büyüme: su ve zaman koşullarını birlikte karşılayın." },
-          { icon: "🎯", title: "Adil Ödül", desc: "Olgunlaşınca ödül havuzu katkı oranına göre dağıtılır." },
-        ].map(({ icon, title, desc }) => (
-          <div key={title} className="bg-gray-900 border border-gray-800 rounded-xl p-5 text-left">
-            <div className="text-3xl mb-2">{icon}</div>
-            <h3 className="font-bold text-white mb-1">{title}</h3>
-            <p className="text-sm text-gray-400">{desc}</p>
+    <div className="space-y-16">
+      <section className="grid items-center gap-8 pt-4 md:grid-cols-[1.1fr_1fr]">
+        <div>
+          <h1 className="font-display text-[2.6rem] font-semibold leading-[1.05] tracking-tight sm:text-6xl">
+            Topluluğunun birlikte büyüttüğü bir bitki.
+          </h1>
+          <p className="mt-5 max-w-[34ch] text-lg leading-relaxed text-ink-soft">
+            Bitki Sui üzerinde tek bir ortak nesne olarak yaşar. Sulayan kazanır; çiçek açtığında ödül
+            havuzu katkıya göre paylaşılır.
+          </p>
+          <div className="mt-8 flex flex-wrap items-center gap-3">
+            {account ? (
+              <Link
+                href="/garden"
+                className="rounded-full bg-water px-6 py-3 font-medium text-white hover:opacity-90"
+              >
+                Bahçeye git
+              </Link>
+            ) : (
+              <WalletButton />
+            )}
+            <Link href="/leaderboard" className="rounded-full px-4 py-3 text-ink-soft hover:text-ink">
+              Sıralamayı gör
+            </Link>
           </div>
-        ))}
-      </div>
-
-      {/* Aşamalar */}
-      <div className="w-full max-w-3xl bg-gray-900 border border-gray-800 rounded-xl p-6">
-        <h2 className="font-bold text-lg text-white mb-4">Büyüme Aşamaları</h2>
-        <div className="flex gap-3 justify-around flex-wrap">
-          {["🌱 Tohum", "🌿 Fide", "🍃 Genç", "🌻 Olgun", "🏆 Hasat"].map((s, i) => (
-            <div key={i} className="flex flex-col items-center gap-1">
-              <span className="text-2xl">{s.split(" ")[0]}</span>
-              <span className="text-xs text-gray-400">{s.split(" ")[1]}</span>
-              <span className="text-xs text-gray-600">Aşama {i + 1}</span>
-            </div>
-          ))}
         </div>
-      </div>
+
+        <figure className="relative mx-auto w-full max-w-sm">
+          <PlantArt stage={garden?.stage ?? 3} maxStage={garden?.maxStage ?? 5} />
+          {IS_CONFIGURED && garden && (
+            <figcaption className="mt-2 text-center text-ink-soft">
+              <span className="font-medium text-ink">{garden.name}</span> şu an{" "}
+              {stageName(garden.stage, garden.maxStage).toLocaleLowerCase("tr")} aşamasında,{" "}
+              {garden.participants.length} kişi suladı, havuzda {formatSui(garden.poolMist)} SUI var.
+            </figcaption>
+          )}
+        </figure>
+      </section>
+
+      <section aria-labelledby="loop-title">
+        <h2 id="loop-title" className="font-display text-2xl font-semibold">
+          Bir bahçe döngüsü
+        </h2>
+        <ol className="mt-6 grid gap-x-8 gap-y-6 sm:grid-cols-2 lg:grid-cols-4">
+          {LOOP.map((step, i) => (
+            <li key={step.title} className="border-t-2 border-ink pt-3">
+              <p className="font-display text-3xl font-semibold text-leaf">{i + 1}</p>
+              <h3 className="mt-1 text-lg font-semibold">{step.title}</h3>
+              <p className="mt-1 leading-relaxed text-ink-soft">{step.body}</p>
+            </li>
+          ))}
+        </ol>
+      </section>
+
+      <section className="max-w-prose space-y-3 leading-relaxed text-ink-soft">
+        <h2 className="font-display text-2xl font-semibold text-ink">Adil kalması için</h2>
+        <p>
+          Her adres için sulama beklemesi, günlük puan sınırı ve gün içinde azalan getiri var. Son
+          aşamada sulamanın puanı düşer; böylece son dakikada gelip payı kapmak işe yaramaz.
+        </p>
+        <p>
+          Ödüller toplu gönderilmez: herkes kendi payını çeker ve her adres yalnızca bir kez çekebilir.
+          Zaman bilgisi sadece Sui&apos;nin zincir saatinden okunur.
+        </p>
+      </section>
     </div>
   );
 }

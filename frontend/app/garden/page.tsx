@@ -1,199 +1,185 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import { useWallet } from "@/lib/wallet";
-import { fetchGarden, buildWaterTx, buildGrowTx, serializeTx, type GardenData } from "@/lib/garden";
+import { useCurrentAccount } from "@mysten/dapp-kit-react";
+import { useState } from "react";
+import { ActivityFeed } from "@/components/ActivityFeed";
+import { PlantArt } from "@/components/PlantArt";
+import { RainGauge } from "@/components/RainGauge";
+import { LoadError, Loading, RequireConfig } from "@/components/States";
+import { TxStatusBanner } from "@/components/TxStatusBanner";
+import { useGarden, useNow, useUserState } from "@/hooks/useGarden";
 import { useTx } from "@/hooks/useTx";
-import { COOLDOWN_MS, mistToSui, msToCountdown } from "@/lib/constants";
-import PlantDisplay from "@/components/PlantDisplay";
-import TxStatusBanner from "@/components/TxStatusBanner";
-import { suiClient } from "@/lib/wallet";
+import { formatDuration, formatSui, percent } from "@/lib/format";
+import {
+  buildGrowTx,
+  buildWaterTx,
+  canGrowNow,
+  stageName,
+  waterProgress,
+  waterWillGrow,
+} from "@/lib/garden";
 
 export default function GardenPage() {
-  const { address, connected, connect, signAndExecuteTransaction } = useWallet();
-  const { txStatus, execute, reset } = useTx();
-  const [garden, setGarden] = useState<GardenData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [cooldownMs, setCooldownMs] = useState(0);
-  const [lastWaterTime, setLastWaterTime] = useState<number | null>(null);
-
-  const loadGarden = useCallback(async () => {
-    setLoading(true);
-    const data = await fetchGarden();
-    setGarden(data);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    loadGarden();
-    const iv = setInterval(loadGarden, 15_000);
-    return () => clearInterval(iv);
-  }, [loadGarden]);
-
-  // Cooldown sayacı
-  useEffect(() => {
-    if (!address || !lastWaterTime) { setCooldownMs(0); return; }
-    const update = () => {
-      const elapsed = Date.now() - lastWaterTime;
-      setCooldownMs(Math.max(0, COOLDOWN_MS - elapsed));
-    };
-    update();
-    const iv = setInterval(update, 1000);
-    return () => clearInterval(iv);
-  }, [address, lastWaterTime]);
-
-  // Kullanıcının son sulama zamanını çek
-  useEffect(() => {
-    if (!address) return;
-    // Basit yaklaşım: son Watered eventinden bul
-    const fetchLastWater = async () => {
-      try {
-        const { PACKAGE_ID, GARDEN_OBJECT_ID } = await import("@/lib/constants");
-        if (PACKAGE_ID.includes("0000")) return;
-        const events = await suiClient.queryEvents({
-          query: { MoveEventType: `${PACKAGE_ID}::garden::Watered` },
-          limit: 50,
-        });
-        const myEvents = events.data
-          .filter((e) => {
-            const p = e.parsedJson as { waterer: string; timestamp_ms: string } | undefined;
-            return p?.waterer === address;
-          })
-          .map((e) => Number((e.parsedJson as { timestamp_ms: string }).timestamp_ms));
-        if (myEvents.length > 0) setLastWaterTime(Math.max(...myEvents));
-      } catch { /* sessiz hata */ }
-    };
-    fetchLastWater();
-  }, [address]);
-
-  const handleWater = async () => {
-    if (!address) return;
-    await execute(async () => {
-      const tx = buildWaterTx();
-      const bytes = await serializeTx(tx, address);
-      const digest = await signAndExecuteTransaction(bytes);
-      setLastWaterTime(Date.now());
-      setTimeout(loadGarden, 2000);
-      return digest;
-    });
-  };
-
-  const handleGrow = async () => {
-    if (!address) return;
-    await execute(async () => {
-      const tx = buildGrowTx();
-      const bytes = await serializeTx(tx, address);
-      const digest = await signAndExecuteTransaction(bytes);
-      setTimeout(loadGarden, 2000);
-      return digest;
-    });
-  };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-64 text-gray-400">
-        <span className="animate-pulse text-4xl">🌿</span>
-        <span className="ml-3">Bahçe yükleniyor…</span>
-      </div>
-    );
-  }
-
-  const isConfigured = process.env.NEXT_PUBLIC_GARDEN_OBJECT_ID && 
-    !process.env.NEXT_PUBLIC_GARDEN_OBJECT_ID.includes("0000");
-
-  if (!isConfigured || !garden) {
-    return (
-      <div className="max-w-lg mx-auto mt-8">
-        <div className="bg-gray-900 border border-yellow-700 rounded-xl p-6 text-center">
-          <div className="text-5xl mb-4">🏗️</div>
-          <h2 className="text-xl font-bold text-yellow-400 mb-2">Bahçe Henüz Kurulmadı</h2>
-          <p className="text-gray-400 text-sm mb-4">
-            Kontrat testnet&apos;e deploy edilmeli ve{" "}
-            <code className="bg-gray-800 px-1 rounded">.env.local</code> dosyasındaki
-            <code className="bg-gray-800 px-1 rounded ml-1">NEXT_PUBLIC_GARDEN_OBJECT_ID</code>{" "}
-            güncellenmeli.
-          </p>
-          <p className="text-xs text-gray-500">
-            Bakınız: <code>DEPLOY.md</code>
-          </p>
-          {connected && (
-            <button
-              onClick={handleGrow}
-              className="mt-4 text-xs text-gray-600 hover:text-gray-400"
-            >
-              (Demo: grow çağır)
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  const canWater = connected && cooldownMs === 0 && !garden.matured;
-
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
-      <h1 className="text-3xl font-bold text-white">🌱 Bahçe</h1>
-
-      {/* Bitki görseli */}
-      <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8">
-        <PlantDisplay garden={garden} />
-      </div>
-
-      {/* İstatistikler */}
-      <div className="grid grid-cols-3 gap-4">
-        {[
-          { label: "Toplam Sulama", value: garden.water_level, icon: "💧" },
-          { label: "Toplam Puan", value: garden.total_points, icon: "⭐" },
-          { label: "Ödül Havuzu", value: `${mistToSui(BigInt(garden.reward_pool))} SUI`, icon: "💰" },
-        ].map(({ label, value, icon }) => (
-          <div key={label} className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
-            <div className="text-2xl mb-1">{icon}</div>
-            <div className="text-xl font-bold text-white">{value}</div>
-            <div className="text-xs text-gray-500">{label}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* İşlem durumu */}
-      <TxStatusBanner {...txStatus} onDismiss={reset} />
-
-      {/* Butonlar */}
-      <div className="flex flex-col gap-3">
-        {!connected ? (
-          <button
-            onClick={connect}
-            className="w-full bg-emerald-700 hover:bg-emerald-600 text-white font-bold py-3 rounded-xl transition-colors"
-          >
-            Cüzdanı Bağla
-          </button>
-        ) : garden.matured ? (
-          <div className="text-center text-emerald-400 font-semibold py-4">
-            🏆 Bahçe olgunlaştı! Hasat sayfasından ödülünüzü çekin.
-          </div>
-        ) : (
-          <>
-            <button
-              onClick={handleWater}
-              disabled={!canWater || txStatus.status === "pending"}
-              className="w-full bg-blue-700 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold py-3 rounded-xl transition-colors"
-            >
-              {txStatus.status === "pending" ? "İşleniyor…" : cooldownMs > 0
-                ? `⏳ Cooldown: ${msToCountdown(cooldownMs)}`
-                : "💧 Sula"}
-            </button>
-
-            <button
-              onClick={handleGrow}
-              disabled={txStatus.status === "pending"}
-              className="w-full bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-white font-semibold py-2 rounded-xl transition-colors text-sm"
-            >
-              🌱 Büyüt (Koşullar sağlanmışsa)
-            </button>
-          </>
-        )}
-      </div>
-    </div>
+    <RequireConfig>
+      <GardenView />
+    </RequireConfig>
   );
 }
 
+function GardenView() {
+  const account = useCurrentAccount();
+  const { data: garden, error, isLoading } = useGarden();
+  const { data: user } = useUserState();
+  const { run, status, reset, busy } = useTx();
+  const now = useNow();
+  const [dropKey, setDropKey] = useState(0);
+
+  if (isLoading) return <Loading />;
+  if (error || !garden) return <LoadError error={error} />;
+
+  const growReadyAt = garden.lastGrowthMs + garden.minStageDurationMs;
+  const timeLeft = Math.max(0, growReadyAt - now);
+  const waterLeft = Math.max(0, garden.waterPerStage - garden.waterLevel);
+  const canGrow = canGrowNow(garden, now);
+  const cooldownLeft = user ? Math.max(0, user.nextWaterMs - now) : 0;
+  const isLateStage = !garden.matured && garden.stage + 1 >= garden.maxStage;
+  const nextWaterGrows = waterWillGrow(garden, now);
+
+  let waterDisabledReason: string | null = null;
+  if (!account) waterDisabledReason = "Sulamak için cüzdanını bağla.";
+  else if (garden.matured) waterDisabledReason = "Bitki olgunlaştı. Hasat sayfasından payını çekebilirsin.";
+  else if (cooldownLeft > 0) waterDisabledReason = `Tekrar sulamak için ${formatDuration(cooldownLeft)} bekle.`;
+
+  async function water() {
+    if (!garden) return;
+    const plain = { pending: "Sulanıyor.", success: "Bitkiyi suladın." };
+    let outcome;
+    if (waterWillGrow(garden, Date.now())) {
+      const blooms = garden.stage + 1 >= garden.maxStage;
+      outcome = await run(buildWaterTx(true), {
+        pending: "Sulanıyor ve bitki büyütülüyor.",
+        success: blooms ? "Suladın ve bitki çiçek açtı. Hasat başladı!" : "Suladın ve bitki bir aşama büyüdü.",
+        // Biri bizden önce büyüttüyse (su/süre artık yetmiyor) sadece sulamayı dene.
+        silentFailure: (code) => code === 4 || code === 5,
+      });
+      if (!outcome.ok && (outcome.abortCode === 4 || outcome.abortCode === 5)) {
+        outcome = await run(buildWaterTx(false), plain);
+      }
+    } else {
+      outcome = await run(buildWaterTx(false), plain);
+    }
+    if (outcome.ok) setDropKey((k) => k + 1);
+  }
+
+  async function grow() {
+    await run(buildGrowTx(), { pending: "Bitki büyütülüyor.", success: "Bitki bir aşama büyüdü." });
+  }
+
+  return (
+    <div className="space-y-8">
+      <div className="grid gap-8 md:grid-cols-[1fr_1fr]">
+        <section className="flex gap-4 rounded-3xl bg-paper-raised p-5 sm:p-6" aria-label="Bitki">
+          <div className="flex-1">
+            <PlantArt
+              stage={garden.stage}
+              maxStage={garden.maxStage}
+              progress={waterProgress(garden)}
+              dropKey={dropKey}
+            />
+          </div>
+          <div className="w-14 py-6">
+            <RainGauge level={garden.waterLevel} perStage={garden.waterPerStage} />
+          </div>
+        </section>
+
+        <section className="flex flex-col gap-6">
+          <header>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">{garden.name}</h1>
+            <p className="mt-1 text-lg text-ink-soft">
+              {stageName(garden.stage, garden.maxStage)}, aşama {garden.stage} / {garden.maxStage}
+            </p>
+          </header>
+
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-4 border-y border-line py-4">
+            <div>
+              <dt className="text-sm text-ink-soft">Sonraki aşama</dt>
+              <dd className="mt-0.5 text-lg font-medium">
+                {garden.matured
+                  ? "Çiçek açtı"
+                  : nextWaterGrows
+                    ? "Bir sonraki sulamada"
+                    : waterLeft > 0
+                    ? `${waterLeft} sulama daha`
+                    : timeLeft > 0
+                      ? `${formatDuration(timeLeft)} sonra`
+                      : "Büyümeye hazır"}
+              </dd>
+              {!garden.matured && !nextWaterGrows && waterLeft > 0 && timeLeft > 0 && (
+                <dd className="text-sm text-ink-soft">ve en erken {formatDuration(timeLeft)} sonra</dd>
+              )}
+            </div>
+            <div>
+              <dt className="text-sm text-ink-soft">Ödül havuzu</dt>
+              <dd className="mt-0.5 text-lg font-medium">{formatSui(garden.poolMist)} SUI</dd>
+            </div>
+            <div>
+              <dt className="text-sm text-ink-soft">Katkın</dt>
+              <dd className="mt-0.5 text-lg font-medium">
+                {user ? `${user.points.toString()} puan` : account ? "…" : "Cüzdan bağlı değil"}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-sm text-ink-soft">Payın</dt>
+              <dd className="mt-0.5 text-lg font-medium">
+                {user ? `%${percent(user.points, garden.totalPoints)}` : "—"}
+              </dd>
+            </div>
+          </dl>
+
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={water}
+                disabled={!!waterDisabledReason || busy}
+                className="flex-1 rounded-full bg-water px-6 py-3.5 text-lg font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {cooldownLeft > 0 && account ? `Sula (${formatDuration(cooldownLeft)})` : "Sula"}
+              </button>
+              {canGrow && (
+                <button
+                  onClick={grow}
+                  disabled={!account || busy}
+                  className="rounded-full border-2 border-leaf px-6 py-3 font-semibold text-leaf-deep hover:bg-leaf/10 disabled:opacity-40"
+                >
+                  Bitkiyi büyüt
+                </button>
+              )}
+            </div>
+            {waterDisabledReason && <p className="text-ink-soft">{waterDisabledReason}</p>}
+            {!waterDisabledReason && isLateStage && (
+              <p className="text-ink-soft">
+                Son aşamadasın: sulamalar 1/{garden.lateStageDivisor} puan kazandırır.
+              </p>
+            )}
+            {nextWaterGrows && !waterDisabledReason && (
+              <p className="text-ink-soft">Su ve süre tamam: sularsan bitki aynı işlemde bir aşama büyür.</p>
+            )}
+            {canGrow && account && waterDisabledReason && (
+              <p className="text-ink-soft">Su ve süre tamam. Bitkiyi bir sonraki aşamaya herkes taşıyabilir.</p>
+            )}
+            <TxStatusBanner status={status} onClose={reset} />
+          </div>
+
+          <p className="text-sm text-ink-soft">
+            Sulama başına {garden.basePoints} puan, günde en fazla {garden.dailyPointCap} puan. Gün içinde{" "}
+            {garden.diminishAfter}. sulamadan sonra puan yarıya iner. Bekleme süresi{" "}
+            {formatDuration(garden.cooldownMs)}.
+          </p>
+        </section>
+      </div>
+
+      <ActivityFeed />
+    </div>
+  );
+}

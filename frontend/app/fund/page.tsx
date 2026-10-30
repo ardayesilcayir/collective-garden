@@ -1,113 +1,111 @@
 "use client";
 
+import { useCurrentAccount } from "@mysten/dapp-kit-react";
 import { useState } from "react";
-import { useWallet } from "@/lib/wallet";
-import { buildFundTx, serializeTx } from "@/lib/garden";
+import { LoadError, Loading, RequireConfig } from "@/components/States";
+import { TxStatusBanner } from "@/components/TxStatusBanner";
+import { useGarden } from "@/hooks/useGarden";
 import { useTx } from "@/hooks/useTx";
-import { MIST_PER_SUI } from "@/lib/constants";
-import TxStatusBanner from "@/components/TxStatusBanner";
+import { formatSui, parseSuiInput } from "@/lib/format";
+import { buildFundTx } from "@/lib/garden";
+
+const PRESETS = ["0.1", "0.5", "1"];
 
 export default function FundPage() {
-  const { address, connected, connect, signAndExecuteTransaction } = useWallet();
-  const { txStatus, execute, reset } = useTx();
-  const [amount, setAmount] = useState("1");
-
-  const handleFund = async () => {
-    if (!address) return;
-    const sui = parseFloat(amount);
-    if (isNaN(sui) || sui <= 0) return;
-
-    const mist = BigInt(Math.floor(sui * Number(MIST_PER_SUI)));
-    await execute(async () => {
-      const tx = buildFundTx(mist);
-      const bytes = await serializeTx(tx, address);
-      return await signAndExecuteTransaction(bytes);
-    });
-  };
-
-  const presets = [0.1, 0.5, 1, 5];
-
   return (
-    <div className="max-w-lg mx-auto space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold text-white">💰 Bahçeyi Fonla</h1>
-        <p className="text-gray-400 mt-1 text-sm">
-          Ödül havuzuna SUI ekleyin. Bahçe olgunlaşınca katkı sahiplerine dağıtılır.
-        </p>
-      </div>
-
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-5">
-        {/* Miktar girişi */}
-        <div>
-          <label className="text-sm text-gray-400 mb-2 block">Miktar (SUI)</label>
-          <div className="flex gap-2">
-            <input
-              type="number"
-              min="0.001"
-              step="0.1"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white font-mono focus:border-emerald-500 focus:outline-none"
-              placeholder="0.0"
-            />
-            <span className="flex items-center text-gray-400 px-2">SUI</span>
-          </div>
-        </div>
-
-        {/* Hızlı seçim */}
-        <div>
-          <label className="text-sm text-gray-500 mb-2 block">Hızlı Seçim</label>
-          <div className="flex gap-2 flex-wrap">
-            {presets.map((p) => (
-              <button
-                key={p}
-                onClick={() => setAmount(String(p))}
-                className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-                  amount === String(p)
-                    ? "border-emerald-500 bg-emerald-900 text-emerald-300"
-                    : "border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600"
-                }`}
-              >
-                {p} SUI
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Uyarı */}
-        <div className="bg-yellow-950 border border-yellow-800 rounded-lg p-3 text-xs text-yellow-300">
-          ⚠️ Testnet üzerinde çalışıyorsunuz. Gerçek SUI kullanmayın; faucet SUI kullanın.
-        </div>
-
-        {/* İşlem durumu */}
-        <TxStatusBanner {...txStatus} onDismiss={reset} />
-
-        {/* Fon butonu */}
-        {!connected ? (
-          <button
-            onClick={connect}
-            className="w-full bg-emerald-700 hover:bg-emerald-600 text-white font-bold py-3 rounded-xl"
-          >
-            Cüzdanı Bağla
-          </button>
-        ) : (
-          <button
-            onClick={handleFund}
-            disabled={txStatus.status === "pending" || !amount || parseFloat(amount) <= 0}
-            className="w-full bg-yellow-600 hover:bg-yellow-500 disabled:opacity-40 text-white font-bold py-3 rounded-xl transition-colors"
-          >
-            {txStatus.status === "pending" ? "İşleniyor…" : `💰 ${amount || "?"} SUI Ekle`}
-          </button>
-        )}
-      </div>
-
-      {/* Açıklama */}
-      <div className="text-xs text-gray-600 space-y-1">
-        <p>• Herkes ödül havuzuna katkıda bulunabilir.</p>
-        <p>• Havuz yalnızca bitki olgunlaştığında dağıtılır.</p>
-        <p>• Dağıtım katkı puanıyla orantılıdır.</p>
-      </div>
-    </div>
+    <RequireConfig>
+      <Fund />
+    </RequireConfig>
   );
 }
 
+function Fund() {
+  const account = useCurrentAccount();
+  const { data: garden, error, isLoading } = useGarden();
+  const { run, status, reset, busy } = useTx();
+  const [amount, setAmount] = useState("0.5");
+
+  if (isLoading) return <Loading />;
+  if (error || !garden) return <LoadError error={error} />;
+
+  const mist = parseSuiInput(amount);
+  let blocked: string | null = null;
+  if (!account) blocked = "Fonlamak için cüzdanını bağla.";
+  else if (garden.matured) blocked = "Bitki olgunlaştı; payların sabit kalması için fonlama kapandı.";
+  else if (amount.trim() && mist === null) blocked = "Geçerli bir SUI miktarı gir (en fazla 9 ondalık).";
+
+  async function fund() {
+    if (!mist) return;
+    await run(buildFundTx(mist), {
+      pending: "Havuz fonlanıyor.",
+      success: `Havuza ${formatSui(mist)} SUI eklendi.`,
+    });
+  }
+
+  return (
+    <div className="mx-auto max-w-xl space-y-8">
+      <header>
+        <h1 className="font-display text-4xl font-semibold tracking-tight">Ödül havuzunu fonla</h1>
+        <p className="mt-2 text-lg text-ink-soft">
+          Eklediğin SUI, bitki çiçek açınca sulayanlara katkılarına göre dağıtılır. Fonlama yalnızca
+          olgunlaşmadan önce açıktır.
+        </p>
+      </header>
+
+      <dl className="grid grid-cols-2 gap-4 border-y border-line py-4">
+        <div>
+          <dt className="text-sm text-ink-soft">Havuzda</dt>
+          <dd className="font-display text-2xl font-semibold">{formatSui(garden.poolMist)} SUI</dd>
+        </div>
+        <div>
+          <dt className="text-sm text-ink-soft">Toplam fon</dt>
+          <dd className="font-display text-2xl font-semibold">{formatSui(garden.totalFundedMist)} SUI</dd>
+        </div>
+      </dl>
+
+      <form
+        className="space-y-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          fund();
+        }}
+      >
+        <label htmlFor="amount" className="block font-medium">
+          Miktar (SUI)
+        </label>
+        <div className="flex items-center gap-2 rounded-full border-2 border-line bg-paper-raised px-5 focus-within:border-water">
+          <input
+            id="amount"
+            inputMode="decimal"
+            autoComplete="off"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            className="min-w-0 flex-1 bg-transparent py-3 text-xl outline-none"
+          />
+          <span className="text-ink-soft">SUI</span>
+        </div>
+        <div className="flex gap-2">
+          {PRESETS.map((p) => (
+            <button
+              type="button"
+              key={p}
+              onClick={() => setAmount(p)}
+              className={`rounded-full border px-4 py-1.5 ${amount === p ? "border-ink bg-ink text-paper" : "border-line hover:bg-mist"}`}
+            >
+              {p.replace(".", ",")}
+            </button>
+          ))}
+        </div>
+        <button
+          type="submit"
+          disabled={!!blocked || !mist || busy}
+          className="w-full rounded-full bg-ink px-6 py-3.5 text-lg font-semibold text-paper hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Havuza {mist ? formatSui(mist) : "0"} SUI ekle
+        </button>
+        {blocked && <p className="text-ink-soft">{blocked}</p>}
+        <TxStatusBanner status={status} onClose={reset} />
+      </form>
+    </div>
+  );
+}
