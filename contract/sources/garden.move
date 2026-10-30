@@ -1,359 +1,430 @@
-/// Kolektif Bahçe — Topluluk tarafından birlikte büyütülen zincir üstü bitki.
-/// Sui Move 2024 sözdizimi kullanılmıştır.
-#[allow(lint(self_transfer))]
-module kolektif_bahce::garden {
+/// Kolektif Bahçe — bir topluluğun birlikte büyüttüğü zincir üstü bitki.
+///
+/// Akış: `create` → (`water` ... `grow`) × N → `fund` (istenen zamanda, olgunlaşmadan önce)
+/// → olgunlaşma → her katılımcı `claim` ile kendi payını çeker (pull-based).
+///
+/// Pay hesabı: `toplam_fon * kullanici_puani / toplam_puan` (u128, önce çarpma sonra bölme).
+/// Bölmeden kalan toz (dust) havuzda kalır; bu bilinçli bir tercihtir.
+module kolektif_bahce::garden;
 
-    use sui::balance::{Self, Balance};
-    use sui::clock::Clock;
-    use sui::coin::{Self, Coin};
-    use sui::event;
-    use sui::sui::SUI;
-    use sui::table::{Self, Table};
+use std::string::String;
+use sui::balance::{Self, Balance};
+use sui::clock::Clock;
+use sui::coin::{Self, Coin};
+use sui::event;
+use sui::sui::SUI;
+use sui::table::{Self, Table};
 
-    // ─── Sabitler ──────────────────────────────────────────────────────────────
+// === Hata kodları (arayüz bu kodları okunur mesajlara çevirir) ===
 
-    /// Sulama arası minimum bekleme süresi: 1 saat (ms)
-    const COOLDOWN_MS: u64 = 3_600_000;
+const EInvalidParams: u64 = 0;
+const ECooldownActive: u64 = 1;
+const EAlreadyMatured: u64 = 2;
+const ENotMatured: u64 = 3;
+const ETooEarlyToGrow: u64 = 4;
+const ENotEnoughWater: u64 = 5;
+const EZeroAmount: u64 = 6;
+const EAlreadyClaimed: u64 = 7;
+const ENoContribution: u64 = 8;
+const EDailyCapReached: u64 = 9;
 
-    /// Toplam büyüme aşaması sayısı (0 = Tohum … 4 = Hasat)
-    const MAX_STAGE: u8 = 4;
+// === Sabitler ===
 
-    /// Bir aşama için gereken minimum su (sulama sayısı)
-    const WATER_PER_STAGE: u64 = 10;
+const DAY_MS: u64 = 86_400_000;
+/// Her sulama su seviyesini bu kadar artırır.
+const WATER_PER_ACTION: u64 = 1;
+/// Parametre üst sınırları (taşma ve saçma değerlere karşı).
+const MAX_STAGES: u8 = 20;
+const MAX_DURATION_MS: u64 = 30 * 86_400_000;
+const MAX_POINTS: u64 = 1_000_000;
 
-    /// Bir aşama için gereken minimum süre (ms) — 1 saat
-    const TIME_PER_STAGE_MS: u64 = 3_600_000;
+// === Nesneler ===
 
-    /// Her sulamada kazanılan temel puan
-    const BASE_POINTS: u64 = 10;
+/// Yeni bahçe başlatma yetkisi. Paket yayınlanırken yayıncıya verilir.
+public struct AdminCap has key, store {
+    id: UID,
+}
 
-    // ─── Hata Kodları ──────────────────────────────────────────────────────────
+/// Bahçe oluşturulurken sabitlenen oyun parametreleri.
+public struct Config has copy, drop, store {
+    /// Olgunlaşma aşaması. `stage == max_stage` olduğunda bahçe olgundur.
+    max_stage: u8,
+    /// Bir aşama ilerlemesi için gereken su.
+    water_per_stage: u64,
+    /// İki aşama arasında geçmesi gereken en kısa süre.
+    min_stage_duration_ms: u64,
+    /// Aynı adres için iki sulama arasındaki bekleme.
+    cooldown_ms: u64,
+    /// Tam puanlı bir sulamanın değeri.
+    base_points: u64,
+    /// Adres başına günlük puan sınırı.
+    daily_point_cap: u64,
+    /// Günde bu kadar sulamadan sonra puan yarıya iner (azalan getiri).
+    diminish_after: u64,
+    /// Son aşamada (olgunlaşmaya yakın) puan bu sayıya bölünür.
+    late_stage_divisor: u64,
+}
 
-    /// Cooldown süresi henüz dolmadı
-    const ECooldownNotElapsed: u64 = 1;
+/// Adresin o günkü sulama sayısı ve kazandığı puan.
+public struct DailyStat has copy, drop, store {
+    day: u64,
+    count: u64,
+    points: u64,
+}
 
-    /// Bahçe henüz olgunlaşmadı
-    const ENotMatured: u64 = 2;
+/// Paylaşılan bahçe nesnesi.
+public struct Garden has key {
+    id: UID,
+    name: String,
+    stage: u8,
+    water_level: u64,
+    last_water_ms: u64,
+    last_growth_ms: u64,
+    created_ms: u64,
+    total_points: u64,
+    contributions: Table<address, u64>,
+    last_water_by: Table<address, u64>,
+    daily: Table<address, DailyStat>,
+    claimed: Table<address, bool>,
+    /// Katkı sıralaması için katılımcı listesi (ilk sulamada eklenir).
+    participants: vector<address>,
+    reward_pool: Balance<SUI>,
+    /// Olgunlaşmaya kadar eklenen toplam fon; pay hesabının tabanı.
+    total_funded: u64,
+    total_claimed: u64,
+    matured: bool,
+    config: Config,
+}
 
-    /// Bu adres zaten claim etti
-    const EAlreadyClaimed: u64 = 3;
+// === Olaylar ===
 
-    /// Kullanıcının hiç puanı yok
-    const ENoContribution: u64 = 4;
+public struct GardenCreated has copy, drop {
+    garden_id: ID,
+    creator: address,
+    name: String,
+    max_stage: u8,
+    water_per_stage: u64,
+    min_stage_duration_ms: u64,
+    cooldown_ms: u64,
+}
 
-    /// Bahçe zaten olgunlaşmış, daha fazla sulama kabul edilmiyor
-    const EAlreadyMatured: u64 = 5;
+public struct Watered has copy, drop {
+    garden_id: ID,
+    by: address,
+    points: u64,
+    user_points: u64,
+    total_points: u64,
+    water_level: u64,
+    stage: u8,
+    timestamp_ms: u64,
+}
 
-    /// Ödül havuzu boş
-    const EEmptyPool: u64 = 6;
+public struct StageAdvanced has copy, drop {
+    garden_id: ID,
+    new_stage: u8,
+    matured: bool,
+    by: address,
+    timestamp_ms: u64,
+}
 
-    // ─── Olaylar ───────────────────────────────────────────────────────────────
+public struct Funded has copy, drop {
+    garden_id: ID,
+    by: address,
+    amount: u64,
+    total_funded: u64,
+}
 
-    public struct GardenCreated has copy, drop {
-        garden_id: address,
-        creator: address,
-        timestamp_ms: u64,
-    }
+public struct Claimed has copy, drop {
+    garden_id: ID,
+    by: address,
+    amount: u64,
+    points: u64,
+}
 
-    public struct Watered has copy, drop {
-        garden_id: address,
-        waterer: address,
-        points_earned: u64,
-        new_water_level: u64,
-        timestamp_ms: u64,
-    }
+// === Başlatma ===
 
-    public struct StageAdvanced has copy, drop {
-        garden_id: address,
-        new_stage: u8,
-        matured: bool,
-        timestamp_ms: u64,
-    }
+fun init(ctx: &mut TxContext) {
+    transfer::public_transfer(AdminCap { id: object::new(ctx) }, ctx.sender());
+}
 
-    public struct Funded has copy, drop {
-        garden_id: address,
-        funder: address,
-        amount: u64,
-        total_pool: u64,
-        timestamp_ms: u64,
-    }
+// === Ana fonksiyonlar ===
 
-    public struct Claimed has copy, drop {
-        garden_id: address,
-        claimer: address,
-        amount: u64,
-        timestamp_ms: u64,
-    }
+/// Yeni bir ortak bahçe oluşturur ve paylaşır (F1).
+public fun create(
+    _: &AdminCap,
+    name: String,
+    max_stage: u8,
+    water_per_stage: u64,
+    min_stage_duration_ms: u64,
+    cooldown_ms: u64,
+    base_points: u64,
+    daily_point_cap: u64,
+    diminish_after: u64,
+    late_stage_divisor: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    assert!(max_stage > 0 && max_stage <= MAX_STAGES, EInvalidParams);
+    assert!(water_per_stage > 0 && water_per_stage <= MAX_POINTS, EInvalidParams);
+    assert!(min_stage_duration_ms <= MAX_DURATION_MS, EInvalidParams);
+    assert!(cooldown_ms <= MAX_DURATION_MS, EInvalidParams);
+    assert!(base_points > 0 && base_points <= MAX_POINTS, EInvalidParams);
+    assert!(daily_point_cap >= base_points && daily_point_cap <= MAX_POINTS, EInvalidParams);
+    assert!(diminish_after > 0, EInvalidParams);
+    assert!(late_stage_divisor > 0 && late_stage_divisor <= base_points, EInvalidParams);
 
-    // ─── AdminCap ──────────────────────────────────────────────────────────────
+    let now = clock.timestamp_ms();
+    let config = Config {
+        max_stage,
+        water_per_stage,
+        min_stage_duration_ms,
+        cooldown_ms,
+        base_points,
+        daily_point_cap,
+        diminish_after,
+        late_stage_divisor,
+    };
+    let garden = Garden {
+        id: object::new(ctx),
+        name,
+        stage: 0,
+        water_level: 0,
+        last_water_ms: 0,
+        last_growth_ms: now,
+        created_ms: now,
+        total_points: 0,
+        contributions: table::new(ctx),
+        last_water_by: table::new(ctx),
+        daily: table::new(ctx),
+        claimed: table::new(ctx),
+        participants: vector[],
+        reward_pool: balance::zero(),
+        total_funded: 0,
+        total_claimed: 0,
+        matured: false,
+        config,
+    };
 
-    /// Bahçe yöneticisine verilen yetki nesnesi.
-    public struct AdminCap has key, store {
-        id: UID,
-    }
+    event::emit(GardenCreated {
+        garden_id: object::id(&garden),
+        creator: ctx.sender(),
+        name: garden.name,
+        max_stage,
+        water_per_stage,
+        min_stage_duration_ms,
+        cooldown_ms,
+    });
+    transfer::share_object(garden);
+}
 
-    // ─── Ana Nesne: Garden ─────────────────────────────────────────────────────
+/// Bahçeyi sular ve çağırana katkı puanı yazar (F2, F3).
+/// Sybil/son-an önlemleri: adres cooldown'u, günlük puan sınırı,
+/// azalan getiri ve son aşamada düşürülmüş puan çarpanı.
+public fun water(garden: &mut Garden, clock: &Clock, ctx: &TxContext) {
+    assert!(!garden.matured, EAlreadyMatured);
+    let now = clock.timestamp_ms();
+    let sender = ctx.sender();
 
-    public struct Garden has key {
-        id: UID,
-        /// 0 = Tohum, 1 = Fide, 2 = Genç Bitki, 3 = Olgun, 4 = Hasat (matured)
-        stage: u8,
-        /// Birikmiş toplam sulama sayısı (su seviyesi)
-        water_level: u64,
-        /// Son sulamanın gerçekleştiği an (ms) — büyüme zamanlaması için
-        last_growth_ms: u64,
-        /// Toplam katkı puanı (tüm kullanıcılar)
-        total_points: u64,
-        /// Adres → katkı puanı
-        contributions: Table<address, u64>,
-        /// Adres → son sulama zamanı (cooldown kontrolü)
-        last_water_by: Table<address, u64>,
-        /// Adres → claim edildi mi?
-        claimed: Table<address, bool>,
-        /// Ödül havuzu
-        reward_pool: Balance<SUI>,
-        /// Bahçe olgunlaştı mı?
-        matured: bool,
-    }
+    // Cooldown (yalnızca Clock zamanı kullanılır).
+    if (garden.last_water_by.contains(sender)) {
+        let last = *garden.last_water_by.borrow(sender);
+        assert!(now >= last + garden.config.cooldown_ms, ECooldownActive);
+        *garden.last_water_by.borrow_mut(sender) = now;
+    } else {
+        garden.last_water_by.add(sender, now);
+    };
 
-    // ─── Fonksiyonlar ──────────────────────────────────────────────────────────
+    // Günlük istatistik (gün değiştiyse sıfırlanır).
+    let day = now / DAY_MS;
+    let mut stat = if (garden.daily.contains(sender)) {
+        *garden.daily.borrow(sender)
+    } else {
+        DailyStat { day, count: 0, points: 0 }
+    };
+    if (stat.day != day) {
+        stat = DailyStat { day, count: 0, points: 0 };
+    };
+    let points = compute_points(&garden.config, garden.stage, &stat);
+    assert!(points > 0, EDailyCapReached);
 
-    /// Yeni bir kolektif bahçe oluşturur.
-    /// AdminCap oluşturucuya verilir; Garden herkese paylaşılır (shared).
-    public fun create(clock: &Clock, ctx: &mut TxContext) {
-        let admin_cap = AdminCap { id: object::new(ctx) };
-        let garden = Garden {
-            id: object::new(ctx),
-            stage: 0,
-            water_level: 0,
-            last_growth_ms: clock.timestamp_ms(),
-            total_points: 0,
-            contributions: table::new(ctx),
-            last_water_by: table::new(ctx),
-            claimed: table::new(ctx),
-            reward_pool: balance::zero(),
-            matured: false,
-        };
+    stat.count = stat.count + 1;
+    stat.points = stat.points + points;
+    if (garden.daily.contains(sender)) {
+        *garden.daily.borrow_mut(sender) = stat;
+    } else {
+        garden.daily.add(sender, stat);
+    };
 
-        event::emit(GardenCreated {
-            garden_id: object::id_address(&garden),
-            creator: ctx.sender(),
-            timestamp_ms: clock.timestamp_ms(),
-        });
+    // Katkı kaydı.
+    let user_points = if (garden.contributions.contains(sender)) {
+        let p = garden.contributions.borrow_mut(sender);
+        *p = *p + points;
+        *p
+    } else {
+        garden.contributions.add(sender, points);
+        garden.participants.push_back(sender);
+        points
+    };
+    garden.total_points = garden.total_points + points;
+    garden.water_level = garden.water_level + WATER_PER_ACTION;
+    garden.last_water_ms = now;
 
-        transfer::share_object(garden);
-        transfer::transfer(admin_cap, ctx.sender());
-    }
+    event::emit(Watered {
+        garden_id: object::id(garden),
+        by: sender,
+        points,
+        user_points,
+        total_points: garden.total_points,
+        water_level: garden.water_level,
+        stage: garden.stage,
+        timestamp_ms: now,
+    });
+}
 
-    /// Bahçeyi sular: cooldown kontrolü yapar, su seviyesini ve puanı artırır.
-    public fun water(garden: &mut Garden, clock: &Clock, ctx: &mut TxContext) {
-        assert!(!garden.matured, EAlreadyMatured);
+/// Zaman ve su koşulu sağlanmışsa bahçeyi bir aşama ilerletir (F4).
+/// Herkes çağırabilir; son aşamada bahçe olgunlaşır.
+public fun grow(garden: &mut Garden, clock: &Clock, ctx: &TxContext) {
+    assert!(!garden.matured, EAlreadyMatured);
+    let now = clock.timestamp_ms();
+    assert!(now >= garden.last_growth_ms + garden.config.min_stage_duration_ms, ETooEarlyToGrow);
+    assert!(garden.water_level >= garden.config.water_per_stage, ENotEnoughWater);
 
-        let sender = ctx.sender();
-        let now_ms = clock.timestamp_ms();
+    garden.water_level = garden.water_level - garden.config.water_per_stage;
+    garden.stage = garden.stage + 1;
+    garden.last_growth_ms = now;
+    if (garden.stage >= garden.config.max_stage) {
+        garden.matured = true;
+    };
 
-        // Cooldown kontrolü
-        if (table::contains(&garden.last_water_by, sender)) {
-            let last_time = *table::borrow(&garden.last_water_by, sender);
-            assert!(now_ms - last_time >= COOLDOWN_MS, ECooldownNotElapsed);
-            *table::borrow_mut(&mut garden.last_water_by, sender) = now_ms;
-        } else {
-            table::add(&mut garden.last_water_by, sender, now_ms);
-        };
+    event::emit(StageAdvanced {
+        garden_id: object::id(garden),
+        new_stage: garden.stage,
+        matured: garden.matured,
+        by: ctx.sender(),
+        timestamp_ms: now,
+    });
+}
 
-        // Su seviyesini artır
-        garden.water_level = garden.water_level + 1;
+/// Ödül havuzuna SUI ekler (F5). Pay tabanının sabit kalması için
+/// yalnızca olgunlaşmadan önce fonlanabilir.
+public fun fund(garden: &mut Garden, payment: Coin<SUI>, ctx: &TxContext) {
+    assert!(!garden.matured, EAlreadyMatured);
+    let amount = payment.value();
+    assert!(amount > 0, EZeroAmount);
 
-        // Puan ekle (azalan getiri: 6. sulamadan sonra %50 puan)
-        let points = calculate_points(garden, sender);
-        if (table::contains(&garden.contributions, sender)) {
-            let existing = table::borrow_mut(&mut garden.contributions, sender);
-            *existing = *existing + points;
-        } else {
-            table::add(&mut garden.contributions, sender, points);
-        };
-        garden.total_points = garden.total_points + points;
+    garden.reward_pool.join(payment.into_balance());
+    garden.total_funded = garden.total_funded + amount;
 
-        event::emit(Watered {
-            garden_id: object::id_address(garden),
-            waterer: sender,
-            points_earned: points,
-            new_water_level: garden.water_level,
-            timestamp_ms: now_ms,
-        });
-    }
+    event::emit(Funded {
+        garden_id: object::id(garden),
+        by: ctx.sender(),
+        amount,
+        total_funded: garden.total_funded,
+    });
+}
 
-    /// Zaman ve su koşulu sağlanmışsa bahçeyi bir aşama ilerletir.
-    /// Son aşamaya ulaşıldığında `matured = true` yapar.
-    public fun grow(garden: &mut Garden, clock: &Clock) {
-        assert!(!garden.matured, EAlreadyMatured);
+/// Olgun bahçeden çağıranın payını çeker (F6, F7). Her adres yalnızca bir kez claim edebilir.
+public fun claim(garden: &mut Garden, ctx: &mut TxContext): Coin<SUI> {
+    assert!(garden.matured, ENotMatured);
+    let sender = ctx.sender();
+    assert!(!garden.claimed.contains(sender), EAlreadyClaimed);
+    assert!(garden.contributions.contains(sender), ENoContribution);
 
-        let now_ms = clock.timestamp_ms();
-        let elapsed_ms = now_ms - garden.last_growth_ms;
+    let points = *garden.contributions.borrow(sender);
+    let amount = share_of(garden.total_funded, points, garden.total_points);
 
-        // Bir sonraki aşama için gereken su eşiği
-        let required_water = ((garden.stage as u64) + 1) * WATER_PER_STAGE;
+    garden.claimed.add(sender, true);
+    garden.total_claimed = garden.total_claimed + amount;
 
-        assert!(elapsed_ms >= TIME_PER_STAGE_MS, ECooldownNotElapsed);
-        assert!(garden.water_level >= required_water, ECooldownNotElapsed);
+    event::emit(Claimed { garden_id: object::id(garden), by: sender, amount, points });
+    coin::take(&mut garden.reward_pool, amount, ctx)
+}
 
-        garden.stage = garden.stage + 1;
-        garden.last_growth_ms = now_ms;
+// === Yardımcılar ===
 
-        if (garden.stage >= MAX_STAGE) {
-            garden.matured = true;
-        };
+/// Bu sulamanın kazandıracağı puan. Günlük sınır doluysa 0 döner.
+fun compute_points(config: &Config, stage: u8, stat: &DailyStat): u64 {
+    if (stat.points >= config.daily_point_cap) return 0;
+    let mut points = config.base_points;
+    if (stat.count >= config.diminish_after) {
+        points = points / 2;
+    };
+    // Olgunlaşmadan önceki son aşama: son an kapma önlemi.
+    if (stage + 1 >= config.max_stage) {
+        points = points / config.late_stage_divisor;
+    };
+    if (points == 0) points = 1;
+    let remaining = config.daily_point_cap - stat.points;
+    if (points > remaining) remaining else points
+}
 
-        event::emit(StageAdvanced {
-            garden_id: object::id_address(garden),
-            new_stage: garden.stage,
-            matured: garden.matured,
-            timestamp_ms: now_ms,
-        });
-    }
+/// Önce çarpma sonra bölme; u128 ile taşma olmaz.
+fun share_of(total_funded: u64, points: u64, total_points: u64): u64 {
+    if (total_points == 0) return 0;
+    ((total_funded as u128) * (points as u128) / (total_points as u128)) as u64
+}
 
-    /// Ödül havuzuna SUI ekler. Herkes fonlayabilir.
-    public fun fund(garden: &mut Garden, payment: Coin<SUI>, clock: &Clock, ctx: &mut TxContext) {
-        let amount = coin::value(&payment);
-        assert!(amount > 0, EEmptyPool);
+// === Okuma fonksiyonları ===
 
-        let balance = coin::into_balance(payment);
-        balance::join(&mut garden.reward_pool, balance);
+public fun name(garden: &Garden): String { garden.name }
 
-        event::emit(Funded {
-            garden_id: object::id_address(garden),
-            funder: ctx.sender(),
-            amount,
-            total_pool: balance::value(&garden.reward_pool),
-            timestamp_ms: clock.timestamp_ms(),
-        });
-    }
+public fun stage(garden: &Garden): u8 { garden.stage }
 
-    /// Olgun bahçede, çağıranın katkı oranına göre ödül payını çeker.
-    public fun claim(garden: &mut Garden, clock: &Clock, ctx: &mut TxContext) {
-        assert!(garden.matured, ENotMatured);
+public fun water_level(garden: &Garden): u64 { garden.water_level }
 
-        let sender = ctx.sender();
+public fun last_water_ms(garden: &Garden): u64 { garden.last_water_ms }
 
-        // Çift claim engeli
-        assert!(!table::contains(&garden.claimed, sender), EAlreadyClaimed);
+public fun last_growth_ms(garden: &Garden): u64 { garden.last_growth_ms }
 
-        // Katkı puanı kontrolü
-        assert!(table::contains(&garden.contributions, sender), ENoContribution);
-        let user_points = *table::borrow(&garden.contributions, sender);
-        assert!(user_points > 0, ENoContribution);
+public fun total_points(garden: &Garden): u64 { garden.total_points }
 
-        // Oransal pay: (kullanıcı_puanı * toplam_havuz) / toplam_puan
-        // Çarpma önce, bölme sonra — tamsayı kayıplarını en aza indirir
-        let total_pool = balance::value(&garden.reward_pool);
-        let share = (user_points * total_pool) / garden.total_points;
-        assert!(share > 0, ENoContribution);
+public fun total_funded(garden: &Garden): u64 { garden.total_funded }
 
-        // Claim kaydı
-        table::add(&mut garden.claimed, sender, true);
+public fun total_claimed(garden: &Garden): u64 { garden.total_claimed }
 
-        // Ödülü transfer et
-        let reward_coin = coin::from_balance(
-            balance::split(&mut garden.reward_pool, share),
-            ctx,
-        );
+public fun pool_value(garden: &Garden): u64 { garden.reward_pool.value() }
 
-        event::emit(Claimed {
-            garden_id: object::id_address(garden),
-            claimer: sender,
-            amount: share,
-            timestamp_ms: clock.timestamp_ms(),
-        });
+public fun is_matured(garden: &Garden): bool { garden.matured }
 
-        transfer::public_transfer(reward_coin, sender);
-    }
+public fun max_stage(garden: &Garden): u8 { garden.config.max_stage }
 
-    // ─── Yardımcı / View Fonksiyonları ────────────────────────────────────────
+public fun cooldown_ms(garden: &Garden): u64 { garden.config.cooldown_ms }
 
-    /// Kullanıcının katkı puanını döndürür (0 = yoksa)
-    public fun get_contribution(garden: &Garden, addr: address): u64 {
-        if (table::contains(&garden.contributions, addr)) {
-            *table::borrow(&garden.contributions, addr)
-        } else {
-            0
-        }
-    }
+public fun participants(garden: &Garden): vector<address> { garden.participants }
 
-    /// Kullanıcının claim edip etmediğini döndürür
-    public fun has_claimed(garden: &Garden, addr: address): bool {
-        table::contains(&garden.claimed, addr)
-    }
+public fun points_of(garden: &Garden, user: address): u64 {
+    if (garden.contributions.contains(user)) *garden.contributions.borrow(user) else 0
+}
 
-    /// Kullanıcının cooldown bitmesi için gereken ms cinsinden süreyi döndürür
-    public fun cooldown_remaining_ms(garden: &Garden, addr: address, now_ms: u64): u64 {
-        if (!table::contains(&garden.last_water_by, addr)) {
-            return 0
-        };
-        let last = *table::borrow(&garden.last_water_by, addr);
-        let elapsed = now_ms - last;
-        if (elapsed >= COOLDOWN_MS) { 0 } else { COOLDOWN_MS - elapsed }
-    }
+public fun has_claimed(garden: &Garden, user: address): bool {
+    garden.claimed.contains(user)
+}
 
-    // Getters (arayüz için)
-    public fun stage(garden: &Garden): u8 { garden.stage }
-    public fun water_level(garden: &Garden): u64 { garden.water_level }
-    public fun total_points(garden: &Garden): u64 { garden.total_points }
-    public fun matured(garden: &Garden): bool { garden.matured }
-    public fun reward_pool_value(garden: &Garden): u64 { balance::value(&garden.reward_pool) }
+/// Kullanıcının bir sonraki sulayabileceği zaman (ms). 0 = hemen.
+public fun next_water_ms(garden: &Garden, user: address): u64 {
+    if (garden.last_water_by.contains(user)) {
+        *garden.last_water_by.borrow(user) + garden.config.cooldown_ms
+    } else 0
+}
 
-    // ─── İç Yardımcılar ───────────────────────────────────────────────────────
+/// Kullanıcının mevcut fon üzerinden payı (claim edilmişse 0).
+public fun pending_reward(garden: &Garden, user: address): u64 {
+    if (garden.claimed.contains(user)) return 0;
+    share_of(garden.total_funded, garden.points_of(user), garden.total_points)
+}
 
-    /// Azalan getiri uygulamalı puan hesabı.
-    /// Adresin 5'ten fazla sulaması varsa yarım puan alır.
-    fun calculate_points(garden: &Garden, addr: address): u64 {
-        if (!table::contains(&garden.contributions, addr)) {
-            return BASE_POINTS
-        };
-        let existing = *table::borrow(&garden.contributions, addr);
-        // Her 10 puanlık sulama = 1 sulama (BASE_POINTS = 10)
-        let water_count = existing / BASE_POINTS;
-        if (water_count >= 5) {
-            BASE_POINTS / 2  // Azalan getiri: %50
-        } else {
-            BASE_POINTS
-        }
-    }
+public fun can_grow(garden: &Garden, clock: &Clock): bool {
+    !garden.matured
+        && clock.timestamp_ms() >= garden.last_growth_ms + garden.config.min_stage_duration_ms
+        && garden.water_level >= garden.config.water_per_stage
+}
 
-    // ─── Testler ───────────────────────────────────────────────────────────────
-    #[test_only]
-    public fun create_for_testing(clock: &Clock, ctx: &mut TxContext): Garden {
-        Garden {
-            id: object::new(ctx),
-            stage: 0,
-            water_level: 0,
-            last_growth_ms: clock.timestamp_ms(),
-            total_points: 0,
-            contributions: table::new(ctx),
-            last_water_by: table::new(ctx),
-            claimed: table::new(ctx),
-            reward_pool: balance::zero(),
-            matured: false,
-        }
-    }
+// === Test yardımcıları ===
 
-    #[test_only]
-    public fun destroy_for_testing(garden: Garden) {
-        let Garden {
-            id,
-            stage: _,
-            water_level: _,
-            last_growth_ms: _,
-            total_points: _,
-            contributions,
-            last_water_by,
-            claimed,
-            reward_pool,
-            matured: _,
-        } = garden;
-        object::delete(id);
-        table::drop(contributions);
-        table::drop(last_water_by);
-        table::drop(claimed);
-        balance::destroy_zero(reward_pool);
-    }
+#[test_only]
+public fun init_for_testing(ctx: &mut TxContext) { init(ctx) }
+
+#[test_only]
+public fun daily_points_of(garden: &Garden, user: address): u64 {
+    if (garden.daily.contains(user)) garden.daily.borrow(user).points else 0
 }

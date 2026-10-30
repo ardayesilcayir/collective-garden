@@ -1,8 +1,6 @@
 [package]
 name = "kolektif_bahce"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
-
-[addresses]
-kolektif_bahce = "0x0"

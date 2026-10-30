@@ -2,42 +2,49 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import WalletButton from "./WalletButton";
+import { WalletButton } from "./Providers";
 
-const NAV = [
-  { href: "/", label: "🏠 Ana Sayfa" },
-  { href: "/garden", label: "🌱 Bahçe" },
-  { href: "/leaderboard", label: "🏆 Sıralama" },
-  { href: "/harvest", label: "🌾 Hasat" },
-  { href: "/fund", label: "💰 Fonla" },
+const LINKS = [
+  { href: "/garden", label: "Bahçe" },
+  { href: "/leaderboard", label: "Sıralama" },
+  { href: "/harvest", label: "Hasat" },
+  { href: "/fund", label: "Fonla" },
 ];
 
-export default function Navbar() {
+export function Navbar() {
   const pathname = usePathname();
   return (
-    <nav className="border-b border-gray-800 bg-gray-950 sticky top-0 z-50">
-      <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
-        <div className="flex items-center gap-6">
-          <span className="text-xl font-bold text-emerald-400">🌿 Kolektif Bahçe</span>
-          <div className="hidden sm:flex gap-1">
-            {NAV.map(({ href, label }) => (
+    <header className="border-b border-line">
+      <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-x-6 gap-y-3 px-4 py-4 sm:px-6">
+        <Link href="/" className="flex items-center gap-2 font-display text-xl font-semibold">
+          <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden>
+            <path d="M13 24V11" stroke="var(--leaf-deep)" strokeWidth="2.4" strokeLinecap="round" />
+            <path d="M13 13C13 7 8 4 3 5c0 5 4 8 10 8Z" fill="var(--leaf)" />
+            <path d="M13 11c0-5 4-8 10-7 0 5-4 7-10 7Z" fill="var(--leaf-deep)" />
+          </svg>
+          Kolektif Bahçe
+        </Link>
+        <nav className="order-3 flex w-full gap-1 overflow-x-auto sm:order-none sm:w-auto" aria-label="Ana menü">
+          {LINKS.map((link) => {
+            const active = pathname === link.href;
+            return (
               <Link
-                key={href}
-                href={href}
-                className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
-                  pathname === href
-                    ? "bg-emerald-900 text-emerald-300 font-semibold"
-                    : "text-gray-400 hover:text-gray-200 hover:bg-gray-800"
+                key={link.href}
+                href={link.href}
+                aria-current={active ? "page" : undefined}
+                className={`whitespace-nowrap rounded-full px-3 py-1.5 text-[15px] transition-colors ${
+                  active ? "bg-ink text-paper" : "text-ink-soft hover:bg-mist hover:text-ink"
                 }`}
               >
-                {label}
+                {link.label}
               </Link>
-            ))}
-          </div>
+            );
+          })}
+        </nav>
+        <div className="ml-auto">
+          <WalletButton />
         </div>
-        <WalletButton />
       </div>
-    </nav>
+    </header>
   );
 }
-

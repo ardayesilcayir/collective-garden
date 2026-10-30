@@ -1,59 +1,60 @@
 "use client";
 
-import { useState } from "react";
+import { useDAppKit } from "@mysten/dapp-kit-react";
+import type { Transaction } from "@mysten/sui/transactions";
+import { useQueryClient } from "@tanstack/react-query";
+import { useCallback, useState } from "react";
+import { extractAbortCode, friendlyError } from "@/lib/errors";
 
-interface TxStatus {
-  status: "idle" | "pending" | "success" | "error";
-  message: string;
-  digest?: string;
+export type TxOutcome = { ok: boolean; abortCode: number | null };
+
+type RunOptions = {
+  pending: string;
+  success: string;
+  /** true dönerse hata kullanıcıya gösterilmez (ör. otomatik yeniden deneme yapılacaksa). */
+  silentFailure?: (abortCode: number | null) => boolean;
+};
+
+export type TxStatus =
+  | { state: "idle" }
+  | { state: "pending"; label: string }
+  | { state: "success"; label: string; digest: string }
+  | { state: "error"; message: string };
+
+/** İşlemi imzalatır, sonucu izler ve zincir verisini yeniler. */
+export function useTx() {
+  const dAppKit = useDAppKit();
+  const queryClient = useQueryClient();
+  const [status, setStatus] = useState<TxStatus>({ state: "idle" });
+
+  const run = useCallback(
+    async (tx: Transaction, labels: RunOptions): Promise<TxOutcome> => {
+      setStatus({ state: "pending", label: labels.pending });
+      const fail = (abortCode: number | null, message: string): TxOutcome => {
+        if (labels.silentFailure?.(abortCode)) setStatus({ state: "idle" });
+        else setStatus({ state: "error", message });
+        return { ok: false, abortCode };
+      };
+      try {
+        const result = await dAppKit.signAndExecuteTransaction({ transaction: tx });
+        if (result.FailedTransaction) {
+          const err = result.FailedTransaction.status.error;
+          const code = err?.$kind === "MoveAbort" ? Number(err.MoveAbort.abortCode) : null;
+          return fail(code, friendlyError(err?.message ?? "", code));
+        }
+        const digest = result.Transaction.digest;
+        await dAppKit.getClient().core.waitForTransaction({ digest }).catch(() => undefined);
+        setStatus({ state: "success", label: labels.success, digest });
+        await queryClient.invalidateQueries();
+        return { ok: true, abortCode: null };
+      } catch (error) {
+        const text = error instanceof Error ? error.message : String(error ?? "");
+        return fail(extractAbortCode(text), friendlyError(error));
+      }
+    },
+    [dAppKit, queryClient],
+  );
+
+  const reset = useCallback(() => setStatus({ state: "idle" }), []);
+  return { run, status, reset, busy: status.state === "pending" };
 }
-
-interface UseTxResult {
-  txStatus: TxStatus;
-  execute: (fn: () => Promise<string>) => Promise<void>;
-  reset: () => void;
-}
-
-export function useTx(): UseTxResult {
-  const [txStatus, setTxStatus] = useState<TxStatus>({ status: "idle", message: "" });
-
-  const execute = async (fn: () => Promise<string>) => {
-    setTxStatus({ status: "pending", message: "İşlem gönderiliyor…" });
-    try {
-      const digest = await fn();
-      setTxStatus({
-        status: "success",
-        message: "İşlem başarılı!",
-        digest,
-      });
-    } catch (e: unknown) {
-      const msg = parseContractError(e);
-      setTxStatus({ status: "error", message: msg });
-    }
-  };
-
-  const reset = () => setTxStatus({ status: "idle", message: "" });
-
-  return { txStatus, execute, reset };
-}
-
-// Kontrat abort kodlarını anlaşılır mesajlara çevir
-function parseContractError(e: unknown): string {
-  const str = String(e);
-  if (str.includes("ECooldownNotElapsed") || str.includes("MoveAbort") && str.includes("1"))
-    return "Cooldown süresi henüz dolmadı. Lütfen bekleyin.";
-  if (str.includes("ENotMatured") || str.includes("MoveAbort") && str.includes("2"))
-    return "Bahçe henüz olgunlaşmadı.";
-  if (str.includes("EAlreadyClaimed") || str.includes("MoveAbort") && str.includes("3"))
-    return "Bu bahçeden zaten ödül çektiniz.";
-  if (str.includes("ENoContribution") || str.includes("MoveAbort") && str.includes("4"))
-    return "Bu bahçede katkınız bulunmuyor.";
-  if (str.includes("EAlreadyMatured") || str.includes("MoveAbort") && str.includes("5"))
-    return "Bahçe zaten olgunlaşmış, sulama kabul edilmiyor.";
-  if (str.includes("InsufficientGas") || str.includes("gas"))
-    return "Yetersiz SUI bakiyesi. Faucet'ten SUI alın.";
-  if (str.includes("Cüzdan bağlı değil"))
-    return "Lütfen önce cüzdanınızı bağlayın.";
-  return `Hata: ${str.slice(0, 120)}`;
-}
-

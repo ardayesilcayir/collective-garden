@@ -1,38 +1,36 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Bricolage_Grotesque, Figtree } from "next/font/google";
+import { Navbar } from "@/components/Navbar";
+import { Providers } from "@/components/Providers";
 import "./globals.css";
-import Navbar from "@/components/Navbar";
-import { WalletProvider } from "@/lib/wallet";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
+const bricolage = Bricolage_Grotesque({
+  variable: "--font-bricolage",
+  subsets: ["latin", "latin-ext"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
+const figtree = Figtree({
+  variable: "--font-figtree",
+  subsets: ["latin", "latin-ext"],
 });
 
 export const metadata: Metadata = {
-  title: "Kolektif Bahçe — Zincir Üstü Topluluk Bahçesi",
-  description: "Topluluğunuzla birlikte büyütün, katkıya göre kazanın.",
+  title: "Kolektif Bahçe",
+  description: "Topluluğunuzun birlikte büyüttüğü, katkıya göre ödül dağıtan zincir üstü bahçe.",
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="tr">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased bg-gray-950 text-gray-100 min-h-screen`}>
-        <WalletProvider>
+    <html lang="tr" className={`${bricolage.variable} ${figtree.variable} h-full antialiased`}>
+      <body className="flex min-h-full flex-col">
+        <Providers>
           <Navbar />
-          <main className="max-w-5xl mx-auto px-4 py-8">
-            {children}
-          </main>
-        </WalletProvider>
+          <main className="mx-auto w-full max-w-5xl flex-1 px-4 pb-16 pt-6 sm:px-6">{children}</main>
+        </Providers>
+        <footer className="mx-auto w-full max-w-5xl px-4 py-6 text-sm text-ink-soft sm:px-6">
+          Sui testnet üzerinde çalışır. Kurtarma ifadeni veya özel anahtarını hiçbir zaman isteyen
+          olmaz; isteyen bir sayfa görürsen kapat.
+        </footer>
       </body>
     </html>
   );

@@ -1,0 +1,18 @@
+{
+  "network": "testnet",
+  "publisher": "0x5f7b2739fec282b6446e3bd5cabacba9107d65c1556c515ec415fd13957a796d",
+  "packageId": "0xe33fe02277337ddc7b0eef1d9314a7770b4d9254452b4408a10d8992775005c8",
+  "adminCapId": "0x2424356d49f10d972754ce42cd25a7d530a743eb80ce7954ac29d243831cd42c",
+  "gardenId": "0x4a907328cfd43a3b0f3021d887f12cb1e6b1df5ae7f306346b1470e5466e8e3a",
+  "params": {
+    "name": "Kolektif Bahçe",
+    "maxStage": 5,
+    "waterPerStage": 5,
+    "minStageDurationMs": 120000,
+    "cooldownMs": 30000,
+    "basePoints": 10,
+    "dailyPointCap": 200,
+    "diminishAfter": 10,
+    "lateStageDivisor": 2
+  }
+}
